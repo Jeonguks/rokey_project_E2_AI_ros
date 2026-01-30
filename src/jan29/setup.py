@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'mini_project'
+package_name = 'jan29'
 
 setup(
     name=package_name,
@@ -14,7 +14,7 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='rokey',
-    maintainer_email='rokey@todo.todo',
+    maintainer_email='ju460648@gmail.com',
     description='TODO: Package description',
     license='TODO: License declaration',
     extras_require={
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'homework = jan29.jan29:main'
         ],
     },
 )
