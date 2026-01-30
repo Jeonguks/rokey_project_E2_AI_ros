@@ -82,6 +82,18 @@ class DepthToMap(Node):
         self.navigator.startToPose(initial_detection_pose)
 
 
+        # # --- initial pose / docking 관련 전부 스킵 ---
+        # initial_detection_pose = self.navigator.getPoseStamped(
+        #     [-1.88335, 1.41718],
+        #     TurtleBot4Directions.SOUTH_EAST
+        # )
+
+        # Nav2만 활성화 대기 (localization이 이미 준비돼있다는 전제)
+        self.navigator.waitUntilNav2Active()
+
+        # 바로 목적지로 이동
+        self.navigator.startToPose(initial_detection_pose)
+
         self.enable_yolo_overlay = True
         self.yolo_conf_th = 0.25
         self.yolo_target_label = "car"   # 필요하면 None으로 해서 전부 그리기
@@ -138,7 +150,10 @@ class DepthToMap(Node):
         with self.lock:
             self.yolo_center_pixel = best_center
             self.yolo_center_conf = best_conf
-            
+        if best_center is not None:
+            self.get_logger().info(
+                f"[YOLO] center_pixel = (u={best_center[0]}, v={best_center[1]}), conf={best_conf:.3f}"
+            )
         # 시각화용 점
         if best_center is not None:
             cv2.circle(out, best_center, 5, (0, 0, 255), -1)
