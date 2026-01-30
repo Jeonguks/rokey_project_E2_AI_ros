@@ -106,7 +106,14 @@ class DepthToMap(Node):
         self.last_goal_time = self.get_clock().now()
         self.goal_period = 1.0  # 1초에 한번만 goal 보내기
 
-#################################TODO FIX ############ 
+        ############################################################
+        self.best_u = None
+        self.best_v = None
+        ###########################################################
+
+
+# TODO FIX THIS FUNCTION 
+         
     def draw_yolo_on_rgb(self, rgb: np.ndarray) -> np.ndarray:
         """RGB 프레임에 YOLO bbox를 그려서 반환"""
         if rgb is None:
@@ -138,12 +145,12 @@ class DepthToMap(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             # center candidate
-            u = int((x1 + x2) // 2)
-            v = int((y1 + y2) // 2)
+            self.best_u = int((x1 + x2) // 2)
+            self.best_v = int((y1 + y2) // 2)
 
             if conf > best_conf:
                 best_conf = conf
-                best_center = (u, v)
+                best_center = (self.best_u, self.best_v)
 
 
                 #  센터 픽셀 저장(그리기 함수에서 뽑아내기)
