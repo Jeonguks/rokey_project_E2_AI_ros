@@ -128,7 +128,7 @@ class DepthToMap(Node):
         self.detect_hold_sec = 5.0          # 5초 유지 시 1회 goal
         self.detect_lost_timeout = 0.7      # 0.7초 이상 안 보이면 hold 리셋
         self.detect_last_seen_time = None   # 최근 탐지 시각
-
+        self.depth_stamp = None  # depth msg stamp 저장
 
 
     def nav_status_tick(self):
@@ -233,6 +233,7 @@ class DepthToMap(Node):
                 with self.lock:
                     self.depth_image = depth
                     self.camera_frame = msg.header.frame_id
+                    self.depth_stamp = Time.from_msg(msg.header.stamp)
         except Exception as e:
             self.get_logger().error(f"Depth CV bridge conversion failed: {e}")
 
@@ -256,11 +257,18 @@ class DepthToMap(Node):
             self.get_logger().info(f"Clicked RGB pixel: ({x}, {y})")
 
     def process_frame(self):
-        if self.K is None or self.rgb_image is None or self.depth_image is None:
+        with self.lock:
+            K = None if self.K is None else self.K.copy()
+            rgb = None if self.rgb_image is None else self.rgb_image.copy()
+            depth = None if self.depth_image is None else self.depth_image.copy()
+            frame_id = getattr(self, "camera_frame", None)
+            depth_stamp = self.depth_stamp  # rclpy.time.Time
+
+        if K is None or rgb is None or depth is None or frame_id is None or depth_stamp is None:
             return
 
-        results = self.model(self.rgb_image, verbose=False)[0]
-        frame = self.rgb_image.copy()
+        results = self.model(rgb, verbose=False)[0]
+        frame = rgb.copy()
 
         for det in results.boxes:
             cls = int(det.cls[0])
@@ -268,50 +276,56 @@ class DepthToMap(Node):
             conf = float(det.conf[0])
             x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
 
-            # Draw box
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-            if label.lower() == "car":
-                u = int((x1 + x2) // 2)
-                v = int((y1 + y2) // 2)
-                z = float(self.depth_image[v, u])
+            if label.lower() != "car":
+                continue
 
-                if z == 0.0:
-                    self.get_logger().warn("Depth value is 0 at detected car's center.")
-                    continue
+            u = int((x1 + x2) // 2)
+            v = int((y1 + y2) // 2)
 
-                fx, fy = self.K[0, 0], self.K[1, 1]
-                cx, cy = self.K[0, 2], self.K[1, 2]
-                x = (u - cx) * z / fx
-                y = (v - cy) * z / fy
+            # 이미지 범위 체크(필수)
+            if not (0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]):
+                continue
 
-                pt = PointStamped()
-                pt.header.frame_id = self.camera_frame
-                pt.header.stamp = rclpy.time.Time().to_msg()
-                pt.point.x, pt.point.y, pt.point.z = x, y, z
+            z = float(depth[v, u])
 
-                try:
-                    pt_map = self.tf_buffer.transform(pt, 'map', timeout=rclpy.duration.Duration(seconds=0.5))
-                    self.latest_map_point = pt_map
+            # depth가 mm면 m로 변환 (너 다른 함수와 단위 통일!)
+            if z > 10.0:   # 대충 mm일 때 흔함(예: 1500)
+                z = z / 1000.0
 
-                    # Don't send more goals if we're already close
-                    if self.block_goal_updates:
-                        self.get_logger().info(f"Within ({self.close_enough_distance}) meter — skipping further goal updates.")
-                        break
+            if z == 0.0 or not (0.2 < z < 5.0):
+                self.get_logger().warn("Invalid depth at detected car's center.")
+                continue
 
-                    self.get_logger().info(f"Detected car at map: ({pt_map.point.x:.2f}, {pt_map.point.y:.2f})")
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            X = (u - cx) * z / fx
+            Y = (v - cy) * z / fy
+            Z = z
 
-                    if self.goal_handle:
-                        self.get_logger().info("Canceling previous goal...")
-                        self.goal_handle.cancel_goal_async()
+            pt = PointStamped()
+            pt.header.frame_id = frame_id
+            pt.header.stamp = depth_stamp.to_msg()   # ★ 여기 핵심 (0 time 금지)
+            pt.point.x, pt.point.y, pt.point.z = X, Y, Z
 
-                    self.send_goal()
+            try:
+                pt_map = self.tf_buffer.transform(pt, "map", timeout=Duration(seconds=0.2))
+                self.latest_map_point = pt_map
 
-                except Exception as e:
-                    self.get_logger().warn(f"TF transform to map failed: {e}")
-                break
+                self.get_logger().info(f"Detected car at map: ({pt_map.point.x:.2f}, {pt_map.point.y:.2f})")
+
+                # 여기서 goal 보내기 전에 “점프 필터” 하나 넣으면 더 안전
+                # if self._is_goal_jump(pt_map.point.x, pt_map.point.y): continue
+
+                self.send_goal()
+
+            except Exception as e:
+                self.get_logger().warn(f"TF transform to map failed: {e}")
+
+            break  # car 하나만 처리
 
         self.display_frame = frame
 
