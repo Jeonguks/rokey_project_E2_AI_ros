@@ -301,8 +301,8 @@ class DepthToMap(Node):
                 depth_normalized = cv2.normalize(depth_display, None, 0, 255, cv2.NORM_MINMAX)
                 depth_colored = cv2.applyColorMap(depth_normalized.astype(np.uint8), cv2.COLORMAP_JET)
 
-                if click is not None:
-                    x, y = click
+                if best_u is not None and best_v is not None:
+                    x, y = best_u , best_v
                     z = float(depth[y, x]) / 1000.0
                     if 0.2 < z < 5.0:
                         fx, fy = self.K[0, 0], self.K[1, 1]
