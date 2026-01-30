@@ -54,6 +54,9 @@ class DepthToMap(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.navigator = TurtleBot4Navigator()
+
+
+
         if not self.navigator.getDockedStatus():
             self.get_logger().info('Docking before initializing pose')
             self.navigator.dock()
@@ -84,6 +87,13 @@ class DepthToMap(Node):
         self.yolo_target_label = "car"   # 필요하면 None으로 해서 전부 그리기
         self.last_yolo_frame = None
 
+
+        # --- goal update control ---
+        self.yolo_center_pixel = None
+        self.yolo_center_conf = 0.0
+        self.last_goal_time = self.get_clock().now()
+        self.goal_period = 1.0  # 1초에 한번만 goal 보내기
+
 #################################TODO FIX ############ 
     def draw_yolo_on_rgb(self, rgb: np.ndarray) -> np.ndarray:
         """RGB 프레임에 YOLO bbox를 그려서 반환"""
@@ -93,6 +103,9 @@ class DepthToMap(Node):
         # Ultralytics는 BGR도 잘 돌지만, 혹시 색 이상하면 cvtColor로 RGB->BGR 조정 가능
         results = self.model(rgb, verbose=False)[0]
         out = rgb.copy()
+        best_center = None
+        best_conf = -1.0
+
 
         for det in results.boxes:
             conf = float(det.conf[0])
@@ -107,9 +120,29 @@ class DepthToMap(Node):
 
             x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
 
+            # 바운딩 박스 그리기 
             cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(out, f"{label} {conf:.2f}", (x1, y1 - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            # center candidate
+            u = int((x1 + x2) // 2)
+            v = int((y1 + y2) // 2)
+
+            if conf > best_conf:
+                best_conf = conf
+                best_center = (u, v)
+
+
+                #  센터 픽셀 저장(그리기 함수에서 뽑아내기)
+        with self.lock:
+            self.yolo_center_pixel = best_center
+            self.yolo_center_conf = best_conf
+            
+        # 시각화용 점
+        if best_center is not None:
+            cv2.circle(out, best_center, 5, (0, 0, 255), -1)
+        
         return out
 
 
