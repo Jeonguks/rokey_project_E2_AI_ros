@@ -60,28 +60,34 @@ class DepthToMap(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.navigator = TurtleBot4Navigator()
+        self.navigator.waitUntilNav2Active()
 
-
+        initial_pose = self.navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)
+        self.navigator.setInitialPose(initial_pose)
 
         if not self.navigator.getDockedStatus():
             self.get_logger().info('Docking before initializing pose')
+
+            pre_docking_pose = self.navigator.getPoseStamped([-0.476557, 0.00556], TurtleBot4Directions.NORTH)
+
+            self.navigator.goToPose(pre_docking_pose)
             self.navigator.dock()
 
-        initial_pose = self.navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)
         initial_detection_pose = self.navigator.getPoseStamped([-1.88335,1.41718], TurtleBot4Directions.SOUTH_EAST) # 잘 보이는 위치로 이동 
 
-        self.navigator.setInitialPose(initial_pose)
-        self.navigator.waitUntilNav2Active()
         self.navigator.undock()
 
         self.logged_intrinsics = False
         self.logged_rgb_shape = False
         self.logged_depth_shape = False
 
+        #######################
         self.create_subscription(CameraInfo, self.info_topic, self.camera_info_callback, 1)
         self.create_subscription(Image, self.depth_topic, self.depth_callback, 1)
         self.create_subscription(CompressedImage, self.rgb_topic, self.rgb_callback, 1)
-        self.create_subscription(boolean, self.is_detected_topic, self.is_detected_cb, 1)
+        self.create_subscription(Bool, self.is_detected_topic, self.is_detected_cb, 1)
+        #######################
+
 
         self.get_logger().info("TF Tree 안정화 시작. 5초 후 변환 시작합니다.")
         self.start_timer = self.create_timer(5.0, self.start_transform)
@@ -96,6 +102,7 @@ class DepthToMap(Node):
         # Nav2만 활성화 대기 (localization이 이미 준비돼있다는 전제)
         self.navigator.waitUntilNav2Active()
 
+        self.navigator.startToPose(initial_detection_pose)
 
         self.enable_yolo_overlay = True
         self.yolo_conf_th = 0.25
@@ -109,26 +116,46 @@ class DepthToMap(Node):
         self.last_goal_time = self.get_clock().now()
         self.goal_period = 1.0  # 1초에 한번만 goal 보내기
 
+
+        self.nav_in_progress = False        # 이동 중인지
+        self.goal_sent_for_hold = False     # 5초 유지 조건으로 goal 이미 보냈는지
+        self.nav_watchdog = self.create_timer(0.2, self.nav_status_tick)
+
         ############################################################
         self.best_u = None
         self.best_v = None
         self.is_detected = False 
         ###########################################################
+        self.detect_start_time = None
 
 
 
-# TODO FIX THIS FUNCTION 
+
+    def nav_status_tick(self):
+        if not self.nav_in_progress:
+            return
+        try:
+            if self.navigator.isTaskComplete():
+                self.nav_in_progress = False
+                self.get_logger().info("[NAV] Task complete → click/detection goals re-enabled.")
+                # 다음 hold를 위해 초기화(원하면)
+                self.detect_start_time = None
+                self.detect_last_seen_time = None
+                self.goal_sent_for_hold = False
+        except Exception as e:
+            self.get_logger().warn(f"[NAV] status check failed: {e}")
+
 
     def is_detected_cb(self, msg: Bool):
         self.is_detected = msg.data   # True / False 저장
 
         if self.is_detected:
-            self.navigator.startToPose(initial_detection_pose)
+            # self.navigator.startToPose(initial_detection_pose)
             self.get_logger().info("Detected = TRUE, Send detection Coord to Robot ")
         else:
             self.get_logger().info("Detected = Not yet Detected")
 
-    def draw_yolo_on_rgb(self, rgb: np.ndarray) -> np.ndarray:
+    def draw_yolo_on_rgb(self, rgb: np.ndarray) -> np.ndarray:# TODO FIX THIS FUNCTION 
         """RGB 프레임에 YOLO bbox를 그려서 반환"""
         if rgb is None:
             return None
@@ -211,6 +238,7 @@ class DepthToMap(Node):
 
     def rgb_callback(self, msg):
         try:
+            self.timer = self.create_timer(0.5, self.process_frame)  # ~30 FPS
             np_arr = np.frombuffer(msg.data, np.uint8)
             rgb = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if rgb is not None and rgb.size > 0:
@@ -290,6 +318,7 @@ class DepthToMap(Node):
 
 
     def display_images(self):
+        
         with self.lock:
             rgb = self.rgb_image.copy() if self.rgb_image is not None else None
             depth = self.depth_image.copy() if self.depth_image is not None else None
@@ -315,8 +344,8 @@ class DepthToMap(Node):
                 depth_normalized = cv2.normalize(depth_display, None, 0, 255, cv2.NORM_MINMAX)
                 depth_colored = cv2.applyColorMap(depth_normalized.astype(np.uint8), cv2.COLORMAP_JET)
 
-                if best_u is not None and best_v is not None:
-                    x, y = best_u , best_v
+                if self.best_u is not None and self.best_v is not None:
+                    x, y = self.best_u , self.best_v
                     z = float(depth[y, x]) / 1000.0
                     if 0.2 < z < 5.0:
                         fx, fy = self.K[0, 0], self.K[1, 1]
@@ -336,22 +365,61 @@ class DepthToMap(Node):
                         pt_map = self.tf_buffer.transform(pt_camera, 'map', timeout=Duration(seconds=1.0))
                         self.get_logger().info(f"Map coordinate: ({pt_map.point.x:.2f}, {pt_map.point.y:.2f}, {pt_map.point.z:.2f})")
 
-                        goal_pose = PoseStamped()
-                        goal_pose.header.frame_id = 'map'
-                        goal_pose.header.stamp = self.get_clock().now().to_msg()
-                        goal_pose.pose.position.x = pt_map.point.x
-                        goal_pose.pose.position.y = pt_map.point.y
-                        goal_pose.pose.position.z = 0.0
-                        yaw = 0.0
-                        qz = math.sin(yaw / 2.0)
-                        qw = math.cos(yaw / 2.0)
-                        goal_pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
 
-                        self.navigator.goToPose(goal_pose)
-                        self.get_logger().info("Sent navigation goal to map coordinate.")
+                        now = self.get_clock().now()
 
-                        with self.lock:
-                            self.clicked_point = None
+                        # 이동 중이면(네비 진행 중) 탐지 기반 goal도 추가로 보내지 않음
+                        if self.nav_in_progress:
+                            # 탐지는 보이더라도 hold 카운트는 하되, goal 트리거는 막고 싶으면 아래 2줄만 남기고 return
+                            self.detect_last_seen_time = now
+                            return
+
+                        # 탐지 “보임” 업데이트
+                        self.detect_last_seen_time = now
+
+                        # hold 시작 시각 세팅
+                        if self.detect_start_time is None:
+                            self.detect_start_time = now
+                            self.goal_sent_for_hold = False
+
+                        # hold 얼마나 됐는지
+                        held = (now - self.detect_start_time).nanoseconds * 1e-9
+
+                        # 5초 이상 유지 + 아직 goal 안 보냈으면 → goal 1회 전송
+                        if held >= self.detect_hold_sec and not self.goal_sent_for_hold:
+                            self.goal_sent_for_hold = True
+                            self.nav_in_progress = True
+
+                            goal_pose = PoseStamped()
+                            goal_pose.header.frame_id = 'map'
+                            goal_pose.header.stamp = now.to_msg()
+                            goal_pose.pose.position.x = pt_map.point.x
+                            goal_pose.pose.position.y = pt_map.point.y
+                            goal_pose.pose.position.z = 0.0
+
+                            yaw = 0.0
+                            qz = math.sin(yaw / 2.0)
+                            qw = math.cos(yaw / 2.0)
+                            goal_pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
+
+                            self.navigator.goToPose(goal_pose)
+                            self.get_logger().info(f"[HOLD] Detected for {held:.2f}s → sending NAV goal once.")
+                        # goal_pose = PoseStamped()
+                        # goal_pose.header.frame_id = 'map'
+                        # goal_pose.header.stamp = self.get_clock().now().to_msg()
+                        # goal_pose.pose.position.x = pt_map.point.x
+                        # goal_pose.pose.position.y = pt_map.point.y
+                        # goal_pose.pose.position.z = 0.0
+                        # yaw = 0.0
+                        # qz = math.sin(yaw / 2.0)
+                        # qw = math.cos(yaw / 2.0)
+                        # goal_pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
+
+                        # self.navigator.goToPose(goal_pose)
+                        # self.get_logger().info("Sent navigation goal to map coordinate.")
+
+                        # with self.lock:
+                        #     self.clicked_point = None
 
                     cv2.circle(rgb_display, (x, y), 4, (0, 255, 0), -1)
                     text = f"{z:.2f} m" if 0.2 < z < 5.0 else "Invalid"
@@ -361,14 +429,25 @@ class DepthToMap(Node):
                 combined = np.hstack((rgb_display, depth_colored))
                 with self.lock:
                     self.display_image = combined.copy()
+                
+                now = self.get_clock().now()
+
+                # 탐지 자체가 최근에 안 보였으면 hold 초기화
+                if self.detect_last_seen_time is not None:
+                    lost = (now - self.detect_last_seen_time).nanoseconds * 1e-9
+                    if lost > self.detect_lost_timeout:
+                        self.detect_start_time = None
+                        self.detect_last_seen_time = None
+                        self.goal_sent_for_hold = False
             except Exception as e:
                 self.get_logger().warn(f"TF or goal error: {e}")
+        
 
     def gui_loop(self):
         cv2.namedWindow('RGB (left) | Depth (right)', cv2.WINDOW_NORMAL)
         cv2.resizeWindow('RGB (left) | Depth (right)', 1280, 480)
         cv2.moveWindow('RGB (left) | Depth (right)', 100, 100)
-        cv2.setMouseCallback('RGB (left) | Depth (right)', self.mouse_callback)
+        # cv2.setMouseCallback('RGB (left) | Depth (right)', self.mouse_callback)
 
         while not self.gui_thread_stop.is_set():
             with self.lock:
