@@ -8,7 +8,6 @@ from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from geometry_msgs.msg import PointStamped, PoseStamped, Quaternion
 from std_msgs.msg import Bool
 
-
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 from tf2_ros import Buffer, TransformListener
 
@@ -43,8 +42,6 @@ class DepthToMap(Node):
         self.clicked_point = None
         self.shutdown_requested = False
         self.display_image = None
-
-
 
 
         # Load YOLOv8 model ################################################
@@ -127,7 +124,10 @@ class DepthToMap(Node):
         self.is_detected = False 
         ###########################################################
         self.detect_start_time = None
-
+        # --- detection hold tuning ---
+        self.detect_hold_sec = 5.0          # 5초 유지 시 1회 goal
+        self.detect_lost_timeout = 0.7      # 0.7초 이상 안 보이면 hold 리셋
+        self.detect_last_seen_time = None   # 최근 탐지 시각
 
 
 
@@ -238,7 +238,6 @@ class DepthToMap(Node):
 
     def rgb_callback(self, msg):
         try:
-            self.timer = self.create_timer(0.5, self.process_frame)  # ~30 FPS
             np_arr = np.frombuffer(msg.data, np.uint8)
             rgb = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if rgb is not None and rgb.size > 0:
