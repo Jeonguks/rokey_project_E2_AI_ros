@@ -6,6 +6,8 @@ from rclpy.time import Time
 
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from geometry_msgs.msg import PointStamped, PoseStamped, Quaternion
+from std_msgs.msg import Bool
+
 
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 from tf2_ros import Buffer, TransformListener
@@ -33,12 +35,16 @@ class DepthToMap(Node):
         self.depth_topic = f'{ns}/oakd/stereo/image_raw'
         self.rgb_topic = f'{ns}/oakd/rgb/image_raw/compressed'
         self.info_topic = f'{ns}/oakd/rgb/camera_info'
+        self.is_detected_topic = f"/object_detected" ##boolean
+
 
         self.depth_image = None
         self.rgb_image = None
         self.clicked_point = None
         self.shutdown_requested = False
         self.display_image = None
+
+
 
 
         # Load YOLOv8 model ################################################
@@ -75,11 +81,10 @@ class DepthToMap(Node):
         self.create_subscription(CameraInfo, self.info_topic, self.camera_info_callback, 1)
         self.create_subscription(Image, self.depth_topic, self.depth_callback, 1)
         self.create_subscription(CompressedImage, self.rgb_topic, self.rgb_callback, 1)
+        self.create_subscription(boolean, self.is_detected_topic, self.is_detected_cb, 1)
 
         self.get_logger().info("TF Tree 안정화 시작. 5초 후 변환 시작합니다.")
         self.start_timer = self.create_timer(5.0, self.start_transform)
-
-        self.navigator.startToPose(initial_detection_pose)
 
 
         # # --- initial pose / docking 관련 전부 스킵 ---
@@ -91,8 +96,6 @@ class DepthToMap(Node):
         # Nav2만 활성화 대기 (localization이 이미 준비돼있다는 전제)
         self.navigator.waitUntilNav2Active()
 
-        # 바로 목적지로 이동
-        self.navigator.startToPose(initial_detection_pose)
 
         self.enable_yolo_overlay = True
         self.yolo_conf_th = 0.25
@@ -109,11 +112,22 @@ class DepthToMap(Node):
         ############################################################
         self.best_u = None
         self.best_v = None
+        self.is_detected = False 
         ###########################################################
 
 
+
 # TODO FIX THIS FUNCTION 
-         
+
+    def is_detected_cb(self, msg: Bool):
+        self.is_detected = msg.data   # True / False 저장
+
+        if self.is_detected:
+            self.navigator.startToPose(initial_detection_pose)
+            self.get_logger().info("Detected = TRUE, Send detection Coord to Robot ")
+        else:
+            self.get_logger().info("Detected = Not yet Detected")
+
     def draw_yolo_on_rgb(self, rgb: np.ndarray) -> np.ndarray:
         """RGB 프레임에 YOLO bbox를 그려서 반환"""
         if rgb is None:
