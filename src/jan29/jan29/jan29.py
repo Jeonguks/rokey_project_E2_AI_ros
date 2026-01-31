@@ -1,37 +1,43 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.duration import Duration
-from rclpy.time import Time
 
+from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
+from nav2_msgs.action import NavigateToPose
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage
-from geometry_msgs.msg import PointStamped, PoseStamped, Quaternion
-from std_msgs.msg import Bool
+from geometry_msgs.msg import PointStamped, PoseStamped
 
-from tf2_ros import Buffer, TransformListener
 from cv_bridge import CvBridge
-
-from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Navigator, TurtleBot4Directions
-from ultralytics import YOLO
-
 import numpy as np
-import cv2
+import tf2_ros
+import tf2_geometry_msgs
+from ultralytics import YOLO
 import threading
-import math
+import time
+import cv2
 
 
-class DepthToMap(Node):
+class YoloPersonNavGoal(Node):
     def __init__(self):
-        super().__init__('depth_to_map_node')
+        super().__init__('nav_to_person')
 
-        # ---------- Shared state ----------
-        self.lock = threading.Lock()
+        cam_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE
+        )
+
+
+        # Internal state
         self.bridge = CvBridge()
         self.K = None
-        self.rgb_image = None
         self.depth_image = None
-        self.depth_stamp = None
+        self.rgb_image = None
         self.camera_frame = None
+        self.latest_map_point = None
 
         self.goal_handle = None
         self.shutdown_requested = False
@@ -41,73 +47,42 @@ class DepthToMap(Node):
         self.block_goal_updates = False
         self.close_distance_hit_count = 0  # To avoid reacting to a single bad reading
 
-
-        # ---------- YOLO ----------
+        # Load YOLOv8 model
         self.model = YOLO("/home/rokey/Downloads/amr_default_best.pt")
 
         # ROS 2 TF and Nav2 setup
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-        
+
+        #####################################################################################
+        self.navigator = TurtleBot4Navigator()
+        if not self.navigator.getDockedStatus():
+            self.get_logger().info('Docking before initializing pose')
+            self.navigator.dock()
+
+        initial_pose = self.navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)
+        self.navigator.setInitialPose(initial_pose)
+        self.navigator.waitUntilNav2Active()
+        self.navigator.undock()
+        ######################################################################################
+
+
+
         # Display
         self.display_frame = None
         self.display_thread = threading.Thread(target=self.display_loop, daemon=True)
         self.display_thread.start()
 
-        # ---------- Navigator ----------
-        self.navigator = TurtleBot4Navigator()
-        self.navigator.waitUntilNav2Active()
-
-        initial_pose = self.navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)
-        self.navigator.setInitialPose(initial_pose)
-
-        # ---------- Topics ----------
-        ns = self.get_namespace()
-        self.depth_topic = f'{ns}/oakd/stereo/image_raw'
-        self.rgb_topic   = f'{ns}/oakd/rgb/image_raw/compressed'
-        self.info_topic  = f'{ns}/oakd/rgb/camera_info'
-        self.is_detected_topic = "/object_detected"
-
-
-
-        # (원래 코드 흐름 유지)
-        if not self.navigator.getDockedStatus():
-            self.get_logger().info('Docking before initializing pose')
-            pre_docking_pose = self.navigator.getPoseStamped([-0.476557, 0.00556], TurtleBot4Directions.NORTH)
-            self.navigator.goToPose(pre_docking_pose)
-            self.navigator.dock()
-
-        initial_detection_pose = self.navigator.getPoseStamped([-1.88335, 1.41718], TurtleBot4Directions.SOUTH_EAST)
-        self.navigator.undock()
-        self.navigator.waitUntilNav2Active()
-        self.navigator.startToPose(initial_detection_pose)
-
-        # ---------- Subscriptions ----------
-        self.create_subscription(CameraInfo, self.info_topic, self.camera_info_callback, 1)
-        self.create_subscription(Image, self.depth_topic, self.depth_callback, 1)
-        self.create_subscription(CompressedImage, self.rgb_topic, self.rgb_callback, 1)
-        self.create_subscription(Bool, self.is_detected_topic, self.is_detected_cb, 1)
-
-        # ---------- GUI thread ----------
-        self.gui_thread_stop = threading.Event()
-        self.gui_thread = threading.Thread(target=self.gui_loop, daemon=True)
-        self.gui_thread.start()
-
-        # ---------- Timers ----------
-        # TF 안정화 후 시작
-        self.get_logger().info("TF Tree 안정화 시작. 5초 후 처리 시작합니다.")
-        self.start_timer = self.create_timer(5.0, self.start_processing)
-        
-        # external bool
-        self.is_detected = False
+        # ROS 2 subscriptions
+        self.create_subscription(CameraInfo, '/robot2/oakd/rgb/preview/camera_info', self.camera_info_callback, cam_qos)
+        self.create_subscription(CompressedImage, '/robot2/oakd/rgb/image_raw/compressed', self.rgb_callback, cam_qos)
+        self.create_subscription(Image, '/robot2/oakd/rgb/preview/depth', self.depth_callback, cam_qos)
 
         # Periodic detection and goal logic
         self.create_timer(0.5, self.process_frame)
         self.last_feedback_log_time = 0
 
-
-    # -------------------- callbacks --------------------
     def camera_info_callback(self, msg):
         self.K = np.array(msg.k).reshape(3, 3)
         if not self.logged_intrinsics:
@@ -117,7 +92,10 @@ class DepthToMap(Node):
 
     def rgb_callback(self, msg):
         try:
-            self.rgb_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.rgb_image = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8') 
+            ## self.rgb_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            ## raw image일때는 이거 사용
+
             self.camera_frame = msg.header.frame_id
         except Exception as e:
             self.get_logger().error(f"RGB conversion failed: {e}")
@@ -240,7 +218,7 @@ class DepthToMap(Node):
     def display_loop(self):
         while rclpy.ok():
             if self.display_frame is not None:
-                cv2.imshow("YOLO Detection", self.display_frame)
+                cv2.imshow("YOLO Detection", self.display_frame) ################ TODO 디버그 할때만 켜놓기 실 주행시 주석처리 
                 key = cv2.waitKey(1)
                 if key == 27:  # ESC
                     self.shutdown_requested = True
@@ -251,21 +229,21 @@ class DepthToMap(Node):
                     self.get_logger().info("Manual reset: goal updates re-enabled.")
             time.sleep(0.01)
 
+
 def main():
     rclpy.init()
-    node = DepthToMap()
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-
+    node = YoloPersonNavGoal()
     try:
-        executor.spin()
+        while rclpy.ok() and not node.shutdown_requested:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
+    finally:
+        node.destroy_node()
+        cv2.destroyAllWindows()
+        if rclpy.ok():
+            rclpy.shutdown()
 
-    node.gui_thread_stop.set()
-    node.gui_thread.join()
-    node.destroy_node()
-    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
