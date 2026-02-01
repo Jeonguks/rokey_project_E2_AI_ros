@@ -46,8 +46,8 @@ class YoloPersonNavGoal(Node):
 
         self.robot_x = None
         self.robot_y = None
-        self.euclidean_max_threshold = 3.5 
-        self.euclidean_min_threshold = 0.5 # meter
+        self.euclidean_max_threshold = 5.5 
+        self.euclidean_min_threshold = 0.5 + 0.5 # meter , offset
 
         self.bridge = CvBridge()
         self.K = None
@@ -89,12 +89,9 @@ class YoloPersonNavGoal(Node):
 
         if (not self.navigator.getDockedStatus()) and (not self.dock_requested):
             self.dock_requested = True
-            self.send_goal(0.3,0.3)
-
             self.get_logger().info("Dock requested")
             self.navigator.dock()
             self.dock_requested = not self.navigator.getDockedStatus() # 도킹이면 false로 플래그 설정
-
 
         initial_pose = self.navigator.getPoseStamped(
             [0.0, 0.0],
@@ -139,7 +136,7 @@ class YoloPersonNavGoal(Node):
     def on_trigger_callback(self, msg: Bool):
         if msg.data and self.state == self.WAIT_TRIGGER:
             self.get_logger().info(
-                "[TRIGGER] object_detected=True -> GO_WAYPOINT"
+                "[TRIGGER] 순찰을 시작합니다. 순찰지점으로 이동합니다."
             )
             self._enter_state(self.GO_WAYPOINT)
 
@@ -218,13 +215,13 @@ class YoloPersonNavGoal(Node):
                     pt_map = self.tf_buffer.transform(pt,'map',timeout=rclpy.duration.Duration(seconds=0.5))
                     self.latest_map_point = pt_map
 
-                    # 로봇-골 유클리드 거리가 0.5미터 이하 골 갱신 금지 및 취소, 3.5미터 초과일경우 무시
+                    # 로봇-골 유클리드 거리 또는 뎁스가 0.5미터 이하 골 갱신 금지 및 취소, 3.5미터 초과일경우 무시
                     dist = math.hypot(self.latest_map_point.point.x - self.robot_x, self.latest_map_point.point.y - self.robot_y)
                     self.get_logger().info(f"[Euclidean Dist] robot-target = {dist:.2f} m")
                     if dist > self.euclidean_max_threshold:
                         self.get_logger().info("[SKIP] target too far, ignore this detection")
                         break
-                    if dist <= self.euclidean_min_threshold:
+                    if dist <= self.euclidean_min_threshold or pt.point.z <= self.euclidean_min_threshold:
                         if not self.block_goal_updates:
                             self.block_goal_updates = True
                             self.get_logger().info("GOAL APPROACHEAD")
@@ -281,8 +278,16 @@ class YoloPersonNavGoal(Node):
         self._get_result_future = self.goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result_callback)
 
-    def goal_result_callback(self, future):
+    def goal_result_callback(self, future): # goal도착 유무 
+        status = future.result().status
         self.goal_handle = None
+        if status == 4 :
+            self.get_logger().info("[STATE] 사전 설정 지역 도착, 탐색시작 ")
+            self._enter_state(self.SEARCH_CAR)
+        elif status == 6:
+            pass
+        else:
+            self.get_logger().warn(f"[WAYPOINT] finished but status={status}")
 
     def display_loop(self):
         while rclpy.ok():
@@ -307,10 +312,6 @@ class YoloPersonNavGoal(Node):
                 )
                 self.sent_waypoint = True
         
-            if self.sent_waypoint and self.navigator.isTaskComplete():
-                self.get_logger().info("[STATE] 사전 설정 지역 도착, 탐색시작 ")
-                self.sent_waypoint = False
-                self._enter_state(self.SEARCH_CAR)
             return
 
 
