@@ -40,7 +40,6 @@ class YoloPersonNavGoal(Node):
         self.dock_requested = False #  도킹 명령 중복전송 방지
         self.undock_requested = False
 
-        self.trigger_topic = "/object_detected"
         self.waypoint_x = -1.88335
         self.waypoint_y = 1.41718
         self.waypoint_yaw = -2.36
@@ -73,24 +72,11 @@ class YoloPersonNavGoal(Node):
         )
         self.display_thread.start()
 
-        self.create_subscription(
-            CameraInfo,
-            '/oakd/rgb/preview/camera_info',
-            self.camera_info_callback,
-            10
-        )
-        self.create_subscription(
-            Image,
-            '/oakd/rgb/preview/image_raw',
-            self.rgb_callback,
-            10
-        )
-        self.create_subscription(
-            Image,
-            '/oakd/rgb/preview/depth',
-            self.depth_callback,
-            10
-        )
+        self.create_subscription(CameraInfo,'/oakd/rgb/preview/camera_info',self.camera_info_callback,10)
+        self.create_subscription(Image,'/oakd/rgb/preview/image_raw',self.rgb_callback,10)
+        self.create_subscription(Image,'/oakd/rgb/preview/depth',self.depth_callback,10)
+        self.create_subscription(Bool, '/object_detected', self.on_trigger_callback, 10)
+
 
         self.last_feedback_log_time = 0
 
