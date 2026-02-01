@@ -168,27 +168,10 @@ class YoloPersonNavGoal(Node):
             cls = int(det.cls[0])
             label = self.model.names[cls]
             conf = float(det.conf[0])
-            x1, y1, x2, y2 = map(
-                int,
-                det.xyxy[0].tolist()
-            )
+            x1, y1, x2, y2 = map(int,det.xyxy[0].tolist())
 
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                2
-            )
-            cv2.putText(
-                frame,
-                f"{label} {conf:.2f}",
-                (x1, y1 - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                1
-            )
+            cv2.rectangle(frame,(x1, y1),(x2, y2),(0, 255, 0),2)
+            cv2.putText(frame,f"{label} {conf:.2f}",(x1, y1 - 5),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0, 255, 0),1)
 
             if label.lower() == "person":
                 u = int((x1 + x2) // 2)
@@ -196,9 +179,7 @@ class YoloPersonNavGoal(Node):
                 z = float(self.depth_image[v, u])
 
                 if z == 0.0:
-                    self.get_logger().warn(
-                        "Depth value is 0 at detected person's center."
-                    )
+                    self.get_logger().warn("Depth value is 0 at detected person's center.")
                     continue
 
                 fx, fy = self.K[0, 0], self.K[1, 1]
@@ -214,11 +195,7 @@ class YoloPersonNavGoal(Node):
                 pt.point.z = z
 
                 try:
-                    pt_map = self.tf_buffer.transform(
-                        pt,
-                        'map',
-                        timeout=rclpy.duration.Duration(seconds=0.5)
-                    )
+                    pt_map = self.tf_buffer.transform(pt,'map',timeout=rclpy.duration.Duration(seconds=0.5))
                     self.latest_map_point = pt_map
 
                     if self.block_goal_updates:
@@ -234,9 +211,7 @@ class YoloPersonNavGoal(Node):
                     )
 
                 except Exception as e:
-                    self.get_logger().warn(
-                        f"TF transform to map failed: {e}"
-                    )
+                    self.get_logger().warn(f"TF transform to map failed: {e}")
                 break
 
         self.display_frame = frame
@@ -250,32 +225,19 @@ class YoloPersonNavGoal(Node):
 
         qz = math.sin(yaw / 2.0)
         qw = math.cos(yaw / 2.0)
-        pose.pose.orientation = Quaternion(
-            x=0.0,
-            y=0.0,
-            z=qz,
-            w=qw
-        )
+        pose.pose.orientation = Quaternion(x=0.0,y=0.0,z=qz,w=qw)
 
         goal = NavigateToPose.Goal()
         goal.pose = pose
 
         self.action_client.wait_for_server()
-        self._send_goal_future = self.action_client.send_goal_async(
-            goal,
-            feedback_callback=self.feedback_callback
-        )
-        self._send_goal_future.add_done_callback(
-            self.goal_response_callback
-        )
+        self._send_goal_future = self.action_client.send_goal_async(goal,feedback_callback=self.feedback_callback)
+        self._send_goal_future.add_done_callback(self.goal_response_callback)
 
     def feedback_callback(self, feedback_msg):
         self.current_distance = feedback_msg.feedback.distance_remaining
 
-        if (
-            self.current_distance is not None
-            and self.current_distance < self.close_enough_distance
-        ):
+        if (self.current_distance is not None and self.current_distance < self.close_enough_distance):
             self.close_distance_hit_count += 1
         else:
             self.close_distance_hit_count = 0
@@ -285,9 +247,7 @@ class YoloPersonNavGoal(Node):
         if not self.goal_handle.accepted:
             return
         self._get_result_future = self.goal_handle.get_result_async()
-        self._get_result_future.add_done_callback(
-            self.goal_result_callback
-        )
+        self._get_result_future.add_done_callback(self.goal_result_callback)
 
     def goal_result_callback(self, future):
         self.goal_handle = None
@@ -314,7 +274,13 @@ class YoloPersonNavGoal(Node):
                     self.waypoint_yaw
                 )
                 self.sent_waypoint = True
+        
+            if self.sent_waypoint:
+                self.get_logger().info("[STATE] Waypoint reached -> SEARCH_CAR")
+                self._enter_state(self.SEARCH_CAR)
             return
+
+
         
         if self.state == self.SEARCH_CAR:
             self.create_timer(0.5, self.process_frame)
