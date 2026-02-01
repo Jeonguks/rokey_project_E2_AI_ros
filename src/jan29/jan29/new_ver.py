@@ -84,7 +84,8 @@ class YoloPersonNavGoal(Node):
 
         if (not self.navigator.getDockedStatus()) and (not self.dock_requested):
             self.dock_requested = True
-            self.get_logger().info("Dock requested")
+            self.send_goal(0.3,0.3)
+            self.get_logger().info("Dock requested, move near of docking station")
             self.navigator.dock()
             self.dock_requested = not self.navigator.getDockedStatus() # 도킹이면 false로 플래그 설정
 
@@ -94,9 +95,11 @@ class YoloPersonNavGoal(Node):
             TurtleBot4Directions.NORTH
         )
         self.navigator.setInitialPose(initial_pose)
+
         self.navigator.waitUntilNav2Active()
         self.get_logger().info("초기화 완료 , 순찰 명령 까지 대기")
 
+        self.process_timer = self.create_timer(0.5, self.process_frame)
 
         self.state_enter_time = time.time()
         self.create_timer(0.2, self.main_loop)
@@ -160,7 +163,9 @@ class YoloPersonNavGoal(Node):
     def process_frame(self):
         if self.K is None or self.rgb_image is None or self.depth_image is None:
             return
-
+        if self.state not in (self.SEARCH_CAR, self.GO_CAR_FRONT):
+            return
+        
         results = self.model(self.rgb_image, verbose=False)[0]
         frame = self.rgb_image.copy()
 
@@ -275,18 +280,17 @@ class YoloPersonNavGoal(Node):
                 )
                 self.sent_waypoint = True
         
-            if self.sent_waypoint:
+            if self.sent_waypoint and self.navigator.isTaskComplete():
                 self.get_logger().info("[STATE] Waypoint reached -> SEARCH_CAR")
+                self.sent_waypoint = False
                 self._enter_state(self.SEARCH_CAR)
             return
 
 
         
-        if self.state == self.SEARCH_CAR:
-            self.create_timer(0.5, self.process_frame)
+        # if self.state == self.SEARCH_CAR:
 
-        if self.state == self.GO_CAR_FRONT:
-            self.create_timer(0.5, self.process_frame)
+        # if self.state == self.GO_CAR_FRONT:
 
         if self.state == self.DONE:
             self.send_goal(0,0)
