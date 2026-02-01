@@ -47,7 +47,7 @@ class FollowCarAfterTrigger(Node):
         self.trigger_topic = "/object_detected"
 
         self.rgb_topic = "/robot2/oakd/rgb/preview/image_raw"
-        self.depth_topic = "/robot2/oakd/rgb/preview/depth"
+        self.depth_topic = "/robot2/oakd/stereo/image_raw"
         self.info_topic = "/robot2/oakd/rgb/preview/camera_info"
 
         self.map_frame = "map"
