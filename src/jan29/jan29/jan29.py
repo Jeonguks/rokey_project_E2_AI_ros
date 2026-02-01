@@ -21,13 +21,14 @@ import math
 import time as pytime
 
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Navigator, TurtleBot4Directions
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 
 class FollowCarAfterTrigger(Node):
     """
-    - /object_detected(True) -> waypoint로 이동(goToPose)
+    - waypoint로 이동(goToPose)
     - 도착 후 YOLO로 'car' 탐지
-    - depth + intrinsics + TF로 car의 map 좌표 계산
+    - DepthToMap 방식(depth passthrough + (필요시)/1000 + PointStamped + tf_buffer.transform)으로 car의 map 좌표 계산
     - car 방향으로 접근하되 stop_distance 만큼 떨어진 지점으로 이동(goToPose)
     - MultiThreadedExecutor + GUI thread
     """
@@ -42,7 +43,7 @@ class FollowCarAfterTrigger(Node):
         super().__init__('follow_car_after_trigger')
 
         #########################################
-        # PARAMETERS  (유지)
+        # PARAMETERS
         #########################################
         self.trigger_topic = "/object_detected"
 
@@ -51,67 +52,98 @@ class FollowCarAfterTrigger(Node):
         self.info_topic = "/robot2/oakd/rgb/preview/camera_info"
 
         self.map_frame = "map"
-        self.base_frame = "base_link"   # base_link만 사용
+        self.base_frame = "base_link"
 
-        self.waypoint_xy = (-1.88335, 1.41718)   # 트리거 후 1차 이동 지점 (map)
-        self.waypoint_yaw = -2.36         # rad   z: -0.9212606138352417 w: 0.3889458592091111
+        self.waypoint_xy = (-1.88335, 1.41718)
+        self.waypoint_yaw = -2.36
 
         self.target_class = "car"
         self.yolo_weights = "/home/rokey/Downloads/amr_default_best.pt"
 
-        self.stop_distance = 0.5        # car 앞에서 멈출 거리(m)
-        self.loop_hz = 5.0              # 메인 tick 주기
-        self.goal_interval = 1.5        # goal 폭주 방지(초)
+        self.stop_distance = 0.5
+        self.loop_hz = 5.0
+        self.goal_interval = 1.5
 
-        # -------------------------
-
-        # 상태
+        #########################################
+        # STATE
+        #########################################
         self.state = self.WAIT_TRIGGER
         self.sent_waypoint = False
         self.sent_car_goal = False
         self.last_goal_time = 0.0
 
-        # 센서/연산 상태
+        #########################################
+        # DATA BUFFERS
+        #########################################
         self.bridge = CvBridge()
         self.K = None
+
         self.rgb = None
         self.depth = None
-        self.camera_frame = None
+
+        # ✅ 프레임 분리: rgb/depth frame_id가 다를 수 있음
+        self.rgb_frame = None
+        self.depth_frame = None
+
+        # ✅ depth encoding 저장(안전): 16UC1이면 mm, 32FC1이면 m일 가능성
+        self.depth_encoding = None
+
         self.lock = threading.Lock()
 
+        #########################################
         # TF
+        #########################################
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        #########################################
         # YOLO
+        #########################################
         self.model = YOLO(self.yolo_weights)
 
+        #########################################
         # Navigator
+        #########################################
         self.navigator = TurtleBot4Navigator()
 
-        # 초기 pose 세팅 + Nav2 active 대기 (DepthToMap 방식)
         initial_pose = self.navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)
         self.navigator.setInitialPose(initial_pose)
         self.navigator.waitUntilNav2Active()
 
-        # ROS Sub
-        # self.create_subscription(Bool, self.trigger_topic, self.on_trigger, 10)  # ✅ 주석 처리
+        #########################################
+        # QoS (중요)
+        #########################################
+        cam_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE
+        )
+
+        #########################################
+        # ROS Subscriptions
+        #########################################
+        # self.create_subscription(Bool, self.trigger_topic, self.on_trigger, 10)  # 필요하면 활성화
         self.create_subscription(CameraInfo, self.info_topic, self.on_info, 10)
         self.create_subscription(Image, self.rgb_topic, self.on_rgb, 10)
         self.create_subscription(Image, self.depth_topic, self.on_depth, 10)
 
-        # ✅ 조건문 부분 일단 True로: 시작하자마자 GO_WAYPOINT로 진입
+        # ✅ 트리거 강제 True: 시작하자마자 GO_WAYPOINT
         self.state = self.GO_WAYPOINT
         self.sent_waypoint = False
         self.sent_car_goal = False
 
+        #########################################
         # GUI
+        #########################################
         self.display_frame = None
         self.gui_stop = threading.Event()
         self.gui_thread = threading.Thread(target=self.gui_loop, daemon=True)
         self.gui_thread.start()
 
+        #########################################
         # Main tick
+        #########################################
         self.timer = self.create_timer(1.0 / self.loop_hz, self.tick)
 
         self.get_logger().info("FollowCarAfterTrigger started.")
@@ -120,7 +152,7 @@ class FollowCarAfterTrigger(Node):
         self.get_logger().info(f"stop_distance: {self.stop_distance:.2f} m")
 
     # -------------------------
-    # Callbacks (유지 스타일)
+    # Callbacks
     # -------------------------
     def on_trigger(self, msg: Bool):
         if bool(msg.data) and self.state == self.WAIT_TRIGGER:
@@ -138,17 +170,72 @@ class FollowCarAfterTrigger(Node):
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
             with self.lock:
                 self.rgb = img
-                self.camera_frame = msg.header.frame_id
+                self.rgb_frame = msg.header.frame_id
         except Exception as e:
             self.get_logger().warn(f"RGB convert failed: {e}")
 
     def on_depth(self, msg: Image):
         try:
-            d = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-            with self.lock:
-                self.depth = d
+            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+            if depth is not None and depth.size > 0:
+                with self.lock:
+                    self.depth = depth
+                    self.depth_frame = msg.header.frame_id
+                    self.depth_encoding = msg.encoding
         except Exception as e:
-            self.get_logger().warn(f"Depth convert failed: {e}")
+            self.get_logger().error(f"Depth CV bridge conversion failed: {e}")
+
+    # -------------------------
+    # DepthToMap 스타일: (u,v) -> map PointStamped
+    # -------------------------
+    def pixel_to_map_point_depthtomap_style(self, u: int, v: int):
+        with self.lock:
+            depth = self.depth.copy() if self.depth is not None else None
+            K = self.K.copy() if self.K is not None else None
+            frame_id = self.depth_frame  # ✅ depth frame 사용
+            enc = self.depth_encoding
+
+        if depth is None or K is None or frame_id is None:
+            return None
+
+        h, w = depth.shape[:2]
+        u = min(max(int(u), 0), w - 1)
+        v = min(max(int(v), 0), h - 1)
+
+        raw = float(depth[v, u])
+
+        # ✅ 안전 단위 처리:
+        # - 16UC1이면 보통 mm
+        # - 32FC1이면 보통 m(환경에 따라 다를 수 있음)
+        if enc == "16UC1":
+            z = raw / 1000.0
+        else:
+            z = raw
+
+        # DepthToMap 코드의 범위 필터 유지
+        if not (0.2 < z < 5.0) or math.isnan(z) or math.isinf(z):
+            return None
+
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+
+        X = (u - cx) * z / fx
+        Y = (v - cy) * z / fy
+        Z = z
+
+        pt_camera = PointStamped()
+        pt_camera.header.stamp = Time().to_msg()  # ✅ DepthToMap과 동일 스타일
+        pt_camera.header.frame_id = frame_id
+        pt_camera.point.x = float(X)
+        pt_camera.point.y = float(Y)
+        pt_camera.point.z = float(Z)
+
+        try:
+            pt_map = self.tf_buffer.transform(pt_camera, self.map_frame, timeout=Duration(seconds=1.0))
+            return pt_map
+        except Exception as e:
+            self.get_logger().warn(f"TF to map failed: {e}")
+            return None
 
     # -------------------------
     # Main loop
@@ -157,7 +244,6 @@ class FollowCarAfterTrigger(Node):
         if self.state == self.WAIT_TRIGGER:
             return
 
-        # goal 폭주 방지(DepthToMap / 기존 코드 스타일)
         now = pytime.time()
         can_send_goal = (now - self.last_goal_time) >= self.goal_interval
 
@@ -174,7 +260,9 @@ class FollowCarAfterTrigger(Node):
                 qw = math.cos(self.waypoint_yaw / 2.0)
                 goal_pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
 
-                self.get_logger().info(f"[GO] waypoint ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})")
+                self.get_logger().info(
+                    f"[GO] waypoint ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})"
+                )
                 self.navigator.goToPose(goal_pose)
 
                 self.sent_waypoint = True
@@ -189,15 +277,22 @@ class FollowCarAfterTrigger(Node):
         if self.state == self.SEARCH_CAR:
             with self.lock:
                 rgb = self.rgb.copy() if self.rgb is not None else None
-                depth = self.depth.copy() if self.depth is not None else None
-                K = self.K.copy() if self.K is not None else None
-                cam_frame = self.camera_frame
+                K_ok = (self.K is not None)
+                depth_ok = (self.depth is not None)
+                rgb_frame = self.rgb_frame
+                depth_frame = self.depth_frame
 
-            if rgb is None or depth is None or K is None or cam_frame is None:
-                self.get_logger().warn(f"[WARN] rgb: {rgb} depth: {depth} K:{K}, cam_frame:{cam_frame}")
+            # ✅ 로그 폭탄 제거: 상태만 출력
+            if rgb is None or (not K_ok) or (not depth_ok) or depth_frame is None:
+                self.get_logger().warn(
+                    f"[WAIT] rgb={'OK' if rgb is not None else 'None'} "
+                    f"K={'OK' if K_ok else 'None'} "
+                    f"depth={'OK' if depth_ok else 'None'} "
+                    f"rgb_frame={rgb_frame} depth_frame={depth_frame}"
+                )
                 return
 
-            # YOLO (YoloPersonNavGoal 방식)
+            # YOLO
             try:
                 res = self.model(rgb, verbose=False)[0]
             except Exception as e:
@@ -231,46 +326,21 @@ class FollowCarAfterTrigger(Node):
             cv2.putText(frame, f"car {best_conf:.2f}", (x1, max(0, y1 - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            h, w = depth.shape[:2]
-            u = min(max(u, 0), w - 1)
-            v = min(max(v, 0), h - 1)
-
-            z = float(depth[v, u]) / 1000.0
-            if z <= 0.01 or math.isnan(z) or math.isinf(z):
-                cv2.putText(frame, "depth invalid", (10, 55),
+            # ✅ DepthToMap 스타일 함수 사용
+            pt_map = self.pixel_to_map_point_depthtomap_style(u, v)
+            if pt_map is None:
+                cv2.putText(frame, "depth/tf invalid", (10, 55),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 self.display_frame = frame
                 return
 
-            cv2.putText(frame, f"depth={z:.2f}m", (10, 55),
+            car_x, car_y = pt_map.point.x, pt_map.point.y
+            cv2.putText(frame, f"map=({car_x:.2f},{car_y:.2f})", (10, 55),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-            fx, fy = K[0, 0], K[1, 1]
-            cx, cy = K[0, 2], K[1, 2]
-
-            X = (u - cx) * z / fx
-            Y = (v - cy) * z / fy
-            Z = z
-
-            pt = PointStamped()
-            pt.header.frame_id = cam_frame
-            pt.header.stamp = Time().to_msg()
-            pt.point.x = float(X)
-            pt.point.y = float(Y)
-            pt.point.z = float(Z)
-
-            # camera -> map (DepthToMap / YoloPersonNavGoal 방식: tf_buffer.transform)
-            try:
-                pt_map = self.tf_buffer.transform(pt, self.map_frame, timeout=Duration(seconds=0.5))
-            except Exception as e:
-                self.get_logger().warn(f"TF transform to map failed: {e}")
-                self.display_frame = frame
-                return
-
-            car_x, car_y = pt_map.point.x, pt_map.point.y
             self.get_logger().info(f"[CAR] map ({car_x:.2f}, {car_y:.2f}, {pt_map.point.z:.2f})")
 
-            # 로봇(map) 좌표: base_link 원점을 map으로 transform (tf_buffer.transform만 사용)
+            # 로봇(base_link origin) -> map
             base_pt = PointStamped()
             base_pt.header.frame_id = self.base_frame
             base_pt.header.stamp = Time().to_msg()
@@ -299,7 +369,7 @@ class FollowCarAfterTrigger(Node):
 
             gx = car_x - ux * self.stop_distance
             gy = car_y - uy * self.stop_distance
-            gyaw = math.atan2(car_y - gy, car_x - gx)
+            gyaw = math.atan2(vy, vx)
 
             self.car_goal = (gx, gy, gyaw)
 
@@ -358,7 +428,7 @@ class FollowCarAfterTrigger(Node):
             return
 
     # -------------------------
-    # GUI loop (유지 스타일)
+    # GUI loop
     # -------------------------
     def gui_loop(self):
         cv2.namedWindow("YOLO Detection", cv2.WINDOW_NORMAL)
@@ -371,8 +441,6 @@ class FollowCarAfterTrigger(Node):
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q') or key == 27:
                     self.get_logger().info("GUI shutdown.")
-                    # self.gui_stop.set()
-                    # rclpy.shutdown()
                     break
                 elif key == ord('r'):
                     self.get_logger().info("Reset -> SEARCH_CAR")
