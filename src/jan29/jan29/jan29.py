@@ -47,18 +47,23 @@ class FollowCarAfterTrigger(Node):
         #########################################
         self.trigger_topic = "/object_detected"
 
-        self.rgb_topic = "/robot2/oakd/rgb/preview/image_raw"
-        self.depth_topic = "/robot2/oakd/stereo/image_raw"
-        self.info_topic = "/robot2/oakd/rgb/preview/camera_info"
+        # self.rgb_topic = "/robot2/oakd/rgb/preview/image_raw"
+        # self.depth_topic = "/robot2/oakd/stereo/image_raw"
+        # self.info_topic = "/robot2/oakd/rgb/preview/camera_info"
 
+
+        self.rgb_topic = "/oakd/rgb/preview/image_raw"
+        self.depth_topic = "/oakd/rgb/preview/depth"
+        self.info_topic = "/oakd/rgb/preview/camera_info"
+    
         self.map_frame = "map"
         self.base_frame = "base_link"
 
         self.waypoint_xy = (-1.88335, 1.41718)
         self.waypoint_yaw = -2.36
 
-        self.target_class = "car"
-        self.yolo_weights = "/home/rokey/Downloads/amr_default_best.pt"
+        self.target_class = "person" ######################################################3
+        self.yolo_weights = "yolov8n.pt"
 
         self.stop_distance = 0.5
         self.loop_hz = 5.0
