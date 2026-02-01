@@ -122,6 +122,7 @@ class YoloPersonNavGoal(Node):
 
         if new_state == self.SEARCH_CAR:
             self.sent_car_goal = False
+            self.block_goal_updates = False
             if self.navigator.isTaskComplete() is False:
                 pass
 
@@ -217,17 +218,17 @@ class YoloPersonNavGoal(Node):
                     pt_map = self.tf_buffer.transform(pt,'map',timeout=rclpy.duration.Duration(seconds=0.5))
                     self.latest_map_point = pt_map
 
-                    # 로봇-골 유클리드 거리가 0.5미터 이하, 3.5미터 초과일경우 골 갱신 금지 및 취소
+                    # 로봇-골 유클리드 거리가 0.5미터 이하 골 갱신 금지 및 취소, 3.5미터 초과일경우 무시
                     dist = math.hypot(self.latest_map_point.point.x - self.robot_x, self.latest_map_point.point.y - self.robot_y)
                     self.get_logger().info(f"[Euclidean Dist] robot-target = {dist:.2f} m")
-
-                    if dist <= self.euclidean_min_threshold or dist>self.euclidean_max_threshold:
+                    if dist > self.euclidean_max_threshold:
+                        self.get_logger().info("[SKIP] target too far, ignore this detection")
+                        break
+                    if dist <= self.euclidean_min_threshold:
                         if not self.block_goal_updates:
                             self.block_goal_updates = True
                             self.get_logger().info("GOAL APPROACHEAD")
-                            if self.goal_handle is not None:
-                                self.goal_handle.cancel_goal_async()
-
+                        break
 
                     if self.block_goal_updates:
                         break
